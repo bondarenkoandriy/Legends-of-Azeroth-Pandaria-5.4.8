@@ -5,91 +5,236 @@ on:
 
   push:
     paths-ignore:
-      - 'sql/**' 
+      - 'sql/**'
 
 concurrency:
-  group: ${{ github.head_ref }} || concat(${{ github.ref }}, ${{ github.workflow }})
+  group: ${{ github.head_ref || github.ref }}-${{ github.workflow }}
   cancel-in-progress: true
 
-
 env:
-  # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
-  REPO_DIR : ${{github.workspace}}
-  BUILD_DIR: ${{github.workspace}}/bin/builddir
+  REPO_DIR: ${{ github.workspace }}
+  BUILD_DIR: ${{ github.workspace }}/bin/builddir
   BOOST_TOOLSET: "msvc"
   BOOST_VERSION: "1.87.0"
-  
+
 jobs:
   build:
     runs-on: windows-2022
-    
+
     steps:
-    #git checkout
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - uses: FranzDiebold/github-env-vars-action@v2.8.0
-    - name: Create Build Environment
-      run: |
-        echo "ARCHIVE_FILENAME=$env:CI_REPOSITORY_NAME-${{matrix.TYPE}}-$env:CI_SHA_SHORT.zip" >> $env:GITHUB_ENV
-        cmake -E make_directory ${{ env.BUILD_DIR }}
- 
-    - name: Install boost
-      uses: MarkusJx/install-boost@v2.5.1
-      id: install-boost
-      with:
-          # REQUIRED: Specify the required boost version
-          # A list of supported versions can be found here: 
-          # https://github.com/actions/boost-versions/blob/main/versions-manifest.json
-          boost_version: ${{env.BOOST_VERSION}}
-          # OPTIONAL: Specify a platform version
-          platform_version: 2022         
-          # OPTIONAL: Specify a toolset on windows
-          toolset: ${{env.BOOST_TOOLSET}}
-          # OPTIONAL: Specify a custon install location
-          boost_install_dir: ${{env.BOOST_INSTALL_DIR}}
-          # NOTE: If a boost version matching all requirements cannot be found,
-          # this build step will fail          
-    - name: windows dependencies
-      run: |
-        #make
-        choco install -y make
-        #cmake
-        choco install -y cmake
-        #openssl
-        choco install -y openssl --version=3.1.1
-      #git bash shell
-      shell: bash
+      - name: Set GitHub environment vars
+        uses: FranzDiebold/github-env-vars-action@v2.8.0
 
-    #build and install
-    - name: windows build & install
-      env:
+      - name: Create Build Environment
+        shell: powershell
+        run: |
+          cmake -E make_directory "${{ env.BUILD_DIR }}"
+
+      - name: Install Boost
+        uses: MarkusJx/install-boost@v2.5.1
+        id: install-boost
+        with:
+          boost_version: ${{ env.BOOST_VERSION }}
+          platform_version: 2022
+          toolset: ${{ env.BOOST_TOOLSET }}
+
+      - name: Install Windows dependencies
+        shell: powershell
+        run: |
+          choco install make -y
+          choco install cmake -y
+          choco install openssl --version=3.1.1 -y
+
+      - name: Show installed OpenSSL
+        shell: powershell
+        run: |
+          Write-Host "OpenSSL version:"
+          & "C:\Program Files\OpenSSL\bin\openssl.exe" version -a
+
+          Write-Host ""
+          Write-Host "OpenSSL directory:"
+          Get-ChildItem "C:\Program Files\OpenSSL" -Recurse -ErrorAction SilentlyContinue |
+            Select-Object FullName
+
+      - name: Configure CMake
+        shell: powershell
+        env:
           BOOST_ROOT: ${{ steps.install-boost.outputs.BOOST_ROOT }}
-      run: |
-        cd $GITHUB_WORKSPACE
-        
-        mkdir -p build && cd build
-        cmake .. -DTOOLS=ON -DELUNA=1 -DPLAYERBOTS=0 -A x64
-        cmake --build . --config RelWithDebInfo --parallel 4
-      #git bash shell
-      shell: bash
-    - name: Check binaries
-      run: |
-        cd ${{github.workspace}}/build/bin/RelWithDebInfo
-        
-        dir
-          copy "C:/Program Files/MySQL/MySQL Server 8.0/lib/libmysql.dll" ${{github.workspace}}/build/bin/RelWithDebInfo/libmysql.dll
-          copy "C:/Program Files/OpenSSL/bin/libcrypto-3-x64.dll" ${{github.workspace}}/build/bin/RelWithDebInfo/libcrypto-3-x64.dll
-          copy "C:/Program Files/OpenSSL/bin/libssl-3-x64.dll" ${{github.workspace}}/build/bin/RelWithDebInfo/libssl-3-x64.dll
-          move ${{github.workspace}}/contrib/lua_scripts ${{github.workspace}}/build/bin/RelWithDebInfo/lua_scripts
-        
-        ./authserver --version
-        ./worldserver --version
+        run: |
+          Set-Location "${{ github.workspace }}"
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        path: ${{github.workspace}}/build/bin/RelWithDebInfo/
-        name: PandariaMasterWin64VS2022
-        # Set a custom retention for artifacts
-        #retention-days: 7
+          if (Test-Path "build") {
+              Remove-Item "build" -Recurse -Force
+          }
+
+          New-Item -ItemType Directory -Path "build" -Force | Out-Null
+
+          cmake `
+            -S . `
+            -B build `
+            -A x64 `
+            -DTOOLS=ON `
+            -DELUNA=1 `
+            -DPLAYERBOTS=0
+
+      - name: Build
+        shell: powershell
+        run: |
+          cmake `
+            --build "${{ github.workspace }}\build" `
+            --config RelWithDebInfo `
+            --parallel 4
+
+      - name: Prepare Windows package
+        shell: powershell
+        run: |
+          $bin = "${{ github.workspace }}\build\bin\RelWithDebInfo"
+
+          Write-Host "Build directory:"
+          Get-ChildItem $bin
+
+          # ------------------------------------------------------------
+          # MySQL runtime
+          # ------------------------------------------------------------
+
+          $mysqlDll = "C:\Program Files\MySQL\MySQL Server 8.0\lib\libmysql.dll"
+
+          if (-not (Test-Path $mysqlDll)) {
+              Write-Error "libmysql.dll not found at: $mysqlDll"
+              exit 1
+          }
+
+          Copy-Item `
+            $mysqlDll `
+            "$bin\libmysql.dll" `
+            -Force
+
+          # ------------------------------------------------------------
+          # OpenSSL runtime
+          # ------------------------------------------------------------
+
+          $cryptoDll = "C:\Program Files\OpenSSL\bin\libcrypto-3-x64.dll"
+          $sslDll = "C:\Program Files\OpenSSL\bin\libssl-3-x64.dll"
+
+          if (-not (Test-Path $cryptoDll)) {
+              Write-Error "libcrypto-3-x64.dll not found"
+              exit 1
+          }
+
+          if (-not (Test-Path $sslDll)) {
+              Write-Error "libssl-3-x64.dll not found"
+              exit 1
+          }
+
+          Copy-Item `
+            $cryptoDll `
+            "$bin\libcrypto-3-x64.dll" `
+            -Force
+
+          Copy-Item `
+            $sslDll `
+            "$bin\libssl-3-x64.dll" `
+            -Force
+
+          # ------------------------------------------------------------
+          # OpenSSL legacy provider
+          # RC4 is inside the legacy provider in OpenSSL 3
+          # ------------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "Searching for OpenSSL legacy.dll..."
+
+          $legacy = Get-ChildItem `
+            "C:\Program Files\OpenSSL" `
+            -Filter "legacy.dll" `
+            -Recurse `
+            -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+
+          if (-not $legacy) {
+              Write-Host "legacy.dll was not found under C:\Program Files\OpenSSL"
+              Write-Host "Trying whole Program Files..."
+
+              $legacy = Get-ChildItem `
+                "C:\Program Files" `
+                -Filter "legacy.dll" `
+                -Recurse `
+                -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+          }
+
+          if (-not $legacy) {
+              Write-Error "OpenSSL legacy.dll was not found!"
+              exit 1
+          }
+
+          Write-Host "Found OpenSSL legacy provider:"
+          Write-Host $legacy.FullName
+
+          $modulesDir = "$bin\ossl-modules"
+
+          New-Item `
+            -ItemType Directory `
+            -Path $modulesDir `
+            -Force | Out-Null
+
+          Copy-Item `
+            $legacy.FullName `
+            "$modulesDir\legacy.dll" `
+            -Force
+
+          # ------------------------------------------------------------
+          # Lua scripts
+          # ------------------------------------------------------------
+
+          $luaSource = "${{ github.workspace }}\contrib\lua_scripts"
+          $luaTarget = "$bin\lua_scripts"
+
+          if (Test-Path $luaSource) {
+              if (Test-Path $luaTarget) {
+                  Remove-Item $luaTarget -Recurse -Force
+              }
+
+              Copy-Item `
+                $luaSource `
+                $luaTarget `
+                -Recurse `
+                -Force
+          }
+
+          # ------------------------------------------------------------
+          # Show final package
+          # ------------------------------------------------------------
+
+          Write-Host ""
+          Write-Host "Final package:"
+          Get-ChildItem $bin -Recurse |
+            Select-Object FullName
+
+      - name: Test binaries
+        shell: powershell
+        run: |
+          $bin = "${{ github.workspace }}\build\bin\RelWithDebInfo"
+
+          $env:OPENSSL_MODULES = "$bin\ossl-modules"
+
+          Write-Host "OPENSSL_MODULES=$env:OPENSSL_MODULES"
+
+          Write-Host ""
+          Write-Host "AuthServer version:"
+          & "$bin\authserver.exe" --version
+
+          Write-Host ""
+          Write-Host "WorldServer version:"
+          & "$bin\worldserver.exe" --version
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          path: ${{ github.workspace }}/build/bin/RelWithDebInfo/
+          name: PandariaMasterWin64VS2022
+          retention-days: 30
