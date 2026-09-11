@@ -1,9 +1,11 @@
 name: windows-build-release
 
 on:
+  workflow_dispatch:
+
   push:
     paths-ignore:
-      - 'sql/**'    
+      - 'sql/**' 
 
 concurrency:
   group: ${{ github.head_ref }} || concat(${{ github.ref }}, ${{ github.workflow }})
