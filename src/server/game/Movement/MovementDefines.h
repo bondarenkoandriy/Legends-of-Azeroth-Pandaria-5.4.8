@@ -107,7 +107,7 @@ struct TC_GAME_API ChaseRange
 
 struct TC_GAME_API ChaseAngle
 {
-    ChaseAngle(float angle, float _tolerance = M_PI_4);
+    ChaseAngle(float angle, float _tolerance = 0.7853981633974483f);
 
     float RelativeAngle;
     float Tolerance;
